@@ -25,7 +25,7 @@
 #define STATUS_INACTIVE "INACTIVE"
 
 /* Inactividad: servidor cambia status a INACTIVE tras este tiempo */
-#define INACTIVITY_TIMEOUT 60  /* segundos — bajar para pruebas */
+#define INACTIVITY_TIMEOUT 60
 
 typedef struct {
     uint8_t  command;      /*   1 byte  */

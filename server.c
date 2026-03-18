@@ -14,11 +14,11 @@
 
 typedef struct {
     char    username[32];
-    char    ip[INET_ADDRSTRLEN];  /* ej: "34.201.55.12" */
-    char    status[16];           /* STATUS_ACTIVE | STATUS_BUSY | STATUS_INACTIVE */
+    char    ip[INET_ADDRSTRLEN];
+    char    status[16];
     int     sockfd;
     int     activo;               /* 1=conectado 0=libre */
-    time_t  ultimo_mensaje;       /* actualizar en cada recv — para detectar inactividad */
+    time_t  ultimo_mensaje;
 } Cliente;
 
 Cliente         lista[MAX_CLIENTES];
@@ -41,12 +41,7 @@ void  send_packet(int sockfd, ChatPacket *pkt);
 int   find_by_name(const char *username);
 void  check_inactivity(void);
 
-/* ═══════════════════════════════════════════════════════════════
-   1) send_packet — envía exactamente sizeof(ChatPacket) bytes
-   ═══════════════════════════════════════════════════════════════
-   send() puede enviar menos bytes de los pedidos (short write),
-   por lo que usamos un loop que avanza el puntero hasta
-   completar los 1024 bytes del paquete.                        */
+
 void send_packet(int sockfd, ChatPacket *pkt) {
     size_t total   = sizeof(ChatPacket);  /* 1024 */
     size_t enviado = 0;
@@ -54,16 +49,11 @@ void send_packet(int sockfd, ChatPacket *pkt) {
 
     while (enviado < total) {
         ssize_t n = send(sockfd, ptr + enviado, total - enviado, 0);
-        if (n <= 0) break;   /* error o desconexión — no podemos hacer más */
+        if (n <= 0) break;
         enviado += (size_t)n;
     }
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   2) find_by_name — busca username entre clientes activos
-   ═══════════════════════════════════════════════════════════════
-   Adquiere mutex porque lista[] se comparte entre hilos.
-   Retorna el índice del cliente o -1 si no se encuentra.       */
 int find_by_name(const char *username) {
     int resultado = -1;
 
@@ -79,20 +69,7 @@ int find_by_name(const char *username) {
     return resultado;
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   3) broadcast_all — envía pkt a todos los clientes activos
-   ═══════════════════════════════════════════════════════════════
-   except_idx = índice a excluir  (-1 = enviar a todos).
 
-   ¿Por qué NO hacemos send() dentro del mutex?
-   Porque send() puede bloquearse si el buffer TCP del receptor
-   está lleno. Si mantuviéramos el mutex durante el send():
-     • Todos los demás hilos quedarían bloqueados esperando
-       el mutex (no podrían recibir, registrar ni salir).
-     • En el peor caso se produce un deadlock si dos hilos
-       intentan enviarse mutuamente con el buffer lleno.
-   La solución: copiamos los fd y el conteo bajo mutex,
-   y luego enviamos fuera del mutex.                            */
 void broadcast_all(ChatPacket *pkt, int except_idx) {
     int fds[MAX_CLIENTES];
     int count = 0;
@@ -112,16 +89,9 @@ void broadcast_all(ChatPacket *pkt, int except_idx) {
     }
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   4) remove_client — desconecta y notifica a todos
-   ═══════════════════════════════════════════════════════════════
-   1. Guarda el username antes de limpiar el slot.
-   2. Marca activo=0 y cierra el socket (bajo mutex).
-   3. Arma CMD_DISCONNECTED y hace broadcast fuera del mutex.   */
 void remove_client(int idx) {
     char username_copia[32];
 
-    /* ── Sección crítica ── */
     pthread_mutex_lock(&mutex_lista);
     strncpy(username_copia, lista[idx].username, sizeof(username_copia) - 1);
     username_copia[sizeof(username_copia) - 1] = '\0';
@@ -131,7 +101,6 @@ void remove_client(int idx) {
 
     printf("Cliente desconectado: %s\n", username_copia);
 
-    /* ── Broadcast fuera del mutex ── */
     ChatPacket aviso;
     memset(&aviso, 0, sizeof(aviso));
     aviso.command = CMD_DISCONNECTED;
@@ -143,22 +112,15 @@ void remove_client(int idx) {
     broadcast_all(&aviso, idx);
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   Stubs restantes — TODO por implementar
-   ═══════════════════════════════════════════════════════════════ */
-
 int init_server(int puerto) {
-    /* 1. Crear socket TCP */
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) { perror("socket"); exit(1); }
 
-    /* 2. Permitir reusar el puerto inmediatamente tras cerrar */
     int opt = 1;
     if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
         perror("setsockopt"); exit(1);
     }
 
-    /* 3. Bind a INADDR_ANY:puerto */
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family      = AF_INET;
@@ -169,7 +131,6 @@ int init_server(int puerto) {
         perror("bind"); exit(1);
     }
 
-    /* 4. Listen con backlog de 10 conexiones pendientes */
     if (listen(fd, 10) < 0) {
         perror("listen"); exit(1);
     }
@@ -178,26 +139,19 @@ int init_server(int puerto) {
     return fd;
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   hilo_cliente — un hilo por conexión
-   ═══════════════════════════════════════════════════════════════ */
 void *hilo_cliente(void *arg) {
     int idx = *(int *)arg;
     free(arg);
     ChatPacket pkt;
     int registrado = 0;
 
-    /* Recuperar la dirección del cliente (guardada en main con inet_ntop,
-       pero necesitamos el struct para handle_register) */
     struct sockaddr_in addr;
     socklen_t addr_len = sizeof(addr);
     getpeername(lista[idx].sockfd, (struct sockaddr *)&addr, &addr_len);
 
     while (1) {
-        /* Revisar inactividad en cada iteración */
         check_inactivity();
 
-        /* Leer exactamente 1024 bytes (tamaño de ChatPacket) */
         memset(&pkt, 0, sizeof(pkt));
         int n = recv(lista[idx].sockfd, &pkt, sizeof(pkt), MSG_WAITALL);
         if (n <= 0) {
@@ -207,21 +161,17 @@ void *hilo_cliente(void *arg) {
             return NULL;
         }
 
-        /* Forzar null-terminators contra clientes maliciosos */
         pkt.payload[956] = '\0';
         pkt.sender[31]   = '\0';
         pkt.target[31]   = '\0';
 
-        /* Actualizar timestamp de último mensaje */
         pthread_mutex_lock(&mutex_lista);
         lista[idx].ultimo_mensaje = time(NULL);
-        /* Si estaba INACTIVE y envía algo, volver a ACTIVE */
         if (registrado && strcmp(lista[idx].status, STATUS_INACTIVE) == 0) {
             strncpy(lista[idx].status, STATUS_ACTIVE, sizeof(lista[idx].status) - 1);
         }
         pthread_mutex_unlock(&mutex_lista);
 
-        /* ── Fase de registro: solo aceptar CMD_REGISTER ── */
         if (!registrado) {
             if (pkt.command == CMD_REGISTER) {
                 handle_register(idx, &pkt, &addr);
@@ -229,11 +179,9 @@ void *hilo_cliente(void *arg) {
                 if (!lista[idx].activo) return NULL;
                 registrado = 1;
             }
-            /* Ignorar cualquier otro comando hasta estar registrado */
             continue;
         }
 
-        /* ── Despacho de comandos ── */
         switch (pkt.command) {
             case CMD_BROADCAST: handle_broadcast(idx, &pkt); break;
             case CMD_DIRECT:    handle_direct(idx, &pkt);    break;
@@ -241,14 +189,11 @@ void *hilo_cliente(void *arg) {
             case CMD_INFO:      handle_info(idx, &pkt);      break;
             case CMD_STATUS:    handle_status(idx, &pkt);    break;
             case CMD_LOGOUT:    handle_logout(idx); return NULL;
-            default: break; /* Ignorar comandos desconocidos sin crashear */
+            default: break;
         }
     }
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   handle_register — CMD_REGISTER
-   ═══════════════════════════════════════════════════════════════ */
 void handle_register(int idx, ChatPacket *pkt, struct sockaddr_in *addr) {
     ChatPacket resp;
     memset(&resp, 0, sizeof(resp));
@@ -310,9 +255,6 @@ void handle_register(int idx, ChatPacket *pkt, struct sockaddr_in *addr) {
     printf("Usuario registrado: %s (%s)\n", pkt->sender, ip_str);
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   handle_broadcast — CMD_BROADCAST
-   ═══════════════════════════════════════════════════════════════ */
 void handle_broadcast(int idx, ChatPacket *pkt) {
     ChatPacket msg;
     memset(&msg, 0, sizeof(msg));
@@ -326,9 +268,6 @@ void handle_broadcast(int idx, ChatPacket *pkt) {
     broadcast_all(&msg, -1);
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   handle_direct — CMD_DIRECT
-   ═══════════════════════════════════════════════════════════════ */
 void handle_direct(int idx, ChatPacket *pkt) {
     int dest = find_by_name(pkt->target);
 
@@ -356,9 +295,6 @@ void handle_direct(int idx, ChatPacket *pkt) {
     send_packet(lista[dest].sockfd, &msg);
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   handle_list — CMD_LIST
-   ═══════════════════════════════════════════════════════════════ */
 void handle_list(int idx, ChatPacket *pkt) {
     ChatPacket resp;
     memset(&resp, 0, sizeof(resp));
@@ -390,9 +326,6 @@ void handle_list(int idx, ChatPacket *pkt) {
     send_packet(lista[idx].sockfd, &resp);
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   handle_info — CMD_INFO
-   ═══════════════════════════════════════════════════════════════ */
 void handle_info(int idx, ChatPacket *pkt) {
     ChatPacket resp;
     memset(&resp, 0, sizeof(resp));
@@ -416,9 +349,6 @@ void handle_info(int idx, ChatPacket *pkt) {
     send_packet(lista[idx].sockfd, &resp);
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   handle_status — CMD_STATUS
-   ═══════════════════════════════════════════════════════════════ */
 void handle_status(int idx, ChatPacket *pkt) {
     ChatPacket resp;
     memset(&resp, 0, sizeof(resp));
@@ -449,9 +379,6 @@ void handle_status(int idx, ChatPacket *pkt) {
     send_packet(lista[idx].sockfd, &resp);
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   handle_logout — CMD_LOGOUT
-   ═══════════════════════════════════════════════════════════════ */
 void handle_logout(int idx) {
     /* Enviar CMD_OK al cliente antes de desconectarlo */
     ChatPacket resp;
@@ -466,16 +393,9 @@ void handle_logout(int idx) {
     remove_client(idx);
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   check_inactivity — detecta clientes inactivos
-   ═══════════════════════════════════════════════════════════════
-   Recorre lista[] buscando clientes activos cuyo último mensaje
-   sea mayor a INACTIVITY_TIMEOUT. Les cambia el status a INACTIVE
-   y les notifica con un CMD_MSG.                                */
 void check_inactivity(void) {
     time_t ahora = time(NULL);
 
-    /* Recopilar los que necesitan cambio bajo mutex */
     int inactivos[MAX_CLIENTES];
     int fds[MAX_CLIENTES];
     int count = 0;
@@ -493,7 +413,6 @@ void check_inactivity(void) {
     }
     pthread_mutex_unlock(&mutex_lista);
 
-    /* Notificar fuera del mutex */
     for (int i = 0; i < count; i++) {
         ChatPacket aviso;
         memset(&aviso, 0, sizeof(aviso));
@@ -509,7 +428,6 @@ void check_inactivity(void) {
 }
 
 int main(int argc, char *argv[]) {
-    /* Validar argumentos */
     if (argc != 2) {
         fprintf(stderr, "Uso: %s <puerto>\n", argv[0]);
         return 1;
@@ -527,7 +445,6 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        /* Buscar slot libre en lista[] */
         pthread_mutex_lock(&mutex_lista);
         int idx = -1;
         for (int i = 0; i < MAX_CLIENTES; i++) {
